@@ -1,0 +1,22 @@
+{
+  "name": "cloudflare-worker-direct",
+  "version": "0.0.0",
+  "scripts": {
+    "login": "wrangler login",
+    "logout": "wrangler logout",
+    "deploy": "wrangler deploy --keep-vars true",
+    "dev": "wrangler dev",
+    "start": "wrangler dev",
+    "build": "wrangler deploy --dry-run --outdir=dist"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240117.0",
+    "@types/ua-parser-js": "^0.7.39",
+    "@types/uuid": "^9.0.8",
+    "typescript": "^5.0.4",
+    "wrangler": "^4.37.1"
+  },
+  "dependencies": {
+    "uuid": "^9.0.1"
+  }
+}
