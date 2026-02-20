@@ -6,6 +6,24 @@ type DirectMatch = {
 	jsonPath: string;
 };
 
+const UPSTREAM_HOST = "https://jbangdev.github.io";
+const UPSTREAM_METADATA_PREFIX = "/jdkdb-data/metadata/";
+
+function buildUpstreamMetadataUrl(inbound: URL): URL | null {
+	// Worker is mounted under some prefix ending in /metadata/* (e.g. /java/metadata/* or /metadata/*).
+	// We map whatever comes after the first "/metadata/" segment to the upstream repo's /metadata/.
+	const marker = "/metadata/";
+	const idx = inbound.pathname.indexOf(marker);
+	if (idx === -1) return null;
+
+	const rest = inbound.pathname.slice(idx + marker.length); // e.g. "ga/linux/x86_64/..."
+	const upstream = new URL(UPSTREAM_HOST);
+	upstream.pathname = `${UPSTREAM_METADATA_PREFIX}${rest}`;
+	upstream.search = inbound.search;
+	upstream.hash = inbound.hash;
+	return upstream;
+}
+
 function isDirectJsonRequest(url: URL): boolean {
 	return url.searchParams.has("direct") && url.pathname.toLowerCase().endsWith(".json");
 }
@@ -72,17 +90,30 @@ export default {
 		void env;
 
 		const url = new URL(request.url);
-
-		if (!isDirectJsonRequest(url)) {
-			return fetch(request);
+		const upstreamUrl = buildUpstreamMetadataUrl(url);
+		if (!upstreamUrl) {
+			return notFoundWithContext("Request path did not contain a /metadata/ segment, so it could not be proxied.", {
+				requestUrl: url.toString(),
+				pathname: url.pathname,
+				expected: "A path containing '/metadata/' (e.g. /java/metadata/ga/... or /metadata/ga/...)",
+			});
 		}
 
-		const upstreamUrl = new URL(url);
+		// Special-case: ?direct + .json => fetch upstream JSON and redirect to first tar.gz/zip url.
+		if (!isDirectJsonRequest(url)) {
+			// Everything else just proxies to the upstream metadata.
+			return fetch(new Request(upstreamUrl, request));
+		}
+
+		// Fetch canonical JSON (remove ?direct before going upstream).
 		upstreamUrl.searchParams.delete("direct");
 
 		let upstreamRes: Response;
 		try {
-			upstreamRes = await fetch(new Request(upstreamUrl, request));
+			upstreamRes = await fetch(upstreamUrl.toString(), {
+				method: "GET",
+				headers: { accept: "application/json" },
+			});
 		} catch (err) {
 			return notFoundWithContext("Upstream fetch failed.", {
 				requestUrl: url.toString(),
