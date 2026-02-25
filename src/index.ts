@@ -6,6 +6,8 @@ type DirectMatch = {
 	jsonPath: string;
 };
 
+const DEFAULT_DIRECT_FILE_TYPES = ["tar.gz", "zip"] as const;
+
 const UPSTREAM_HOST = "https://jbangdev.github.io";
 const UPSTREAM_METADATA_PREFIX = "/jdkdb-data/metadata/";
 
@@ -28,21 +30,43 @@ function isDirectJsonRequest(url: URL): boolean {
 	return url.searchParams.has("direct") && url.pathname.toLowerCase().endsWith(".json");
 }
 
-function findFirstDirectMatch(value: unknown): DirectMatch | null {
-	const targetTypes = new Set(["tar.gz", "zip"]);
+function normalizeDirectFileType(raw: string): string {
+	const normalized = raw.trim().toLowerCase().replace(/^\.+/, "");
+	if (normalized === "tgz") return "tar.gz";
+	return normalized;
+}
+
+function getDirectFileTypePreferences(url: URL): string[] {
+	const directParam = url.searchParams.get("direct");
+	if (directParam === null || directParam.trim() === "") {
+		return [...DEFAULT_DIRECT_FILE_TYPES];
+	}
+
+	const prefs: string[] = [];
+	for (const part of directParam.split(",")) {
+		const fileType = normalizeDirectFileType(part);
+		if (!fileType || prefs.includes(fileType)) continue;
+		prefs.push(fileType);
+	}
+
+	return prefs.length > 0 ? prefs : [...DEFAULT_DIRECT_FILE_TYPES];
+}
+
+function findPreferredDirectMatch(value: unknown, preferredFileTypes: string[]): DirectMatch | null {
+	const targetTypes = new Set(preferredFileTypes);
+	const firstByType = new Map<string, DirectMatch>();
 	const seen = new Set<unknown>();
 
-	const walk = (node: unknown, path: string): DirectMatch | null => {
-		if (node === null || typeof node !== "object") return null;
-		if (seen.has(node)) return null;
+	const walk = (node: unknown, path: string): void => {
+		if (node === null || typeof node !== "object") return;
+		if (seen.has(node)) return;
 		seen.add(node);
 
 		if (Array.isArray(node)) {
 			for (let i = 0; i < node.length; i++) {
-				const hit = walk(node[i], `${path}[${i}]`);
-				if (hit) return hit;
+				walk(node[i], `${path}[${i}]`);
 			}
-			return null;
+			return;
 		}
 
 		const obj = node as Record<string, unknown>;
@@ -50,17 +74,22 @@ function findFirstDirectMatch(value: unknown): DirectMatch | null {
 		const url = typeof obj.url === "string" ? obj.url : null;
 
 		if (fileType && url && targetTypes.has(fileType)) {
-			return { url, fileType, jsonPath: path };
+			if (!firstByType.has(fileType)) {
+				firstByType.set(fileType, { url, fileType, jsonPath: path });
+			}
 		}
 
 		for (const [k, v] of Object.entries(obj)) {
-			const hit = walk(v, path ? `${path}.${k}` : k);
-			if (hit) return hit;
+			walk(v, path ? `${path}.${k}` : k);
 		}
-		return null;
 	};
 
-	return walk(value, "");
+	walk(value, "");
+	for (const fileType of preferredFileTypes) {
+		const match = firstByType.get(fileType);
+		if (match) return match;
+	}
+	return null;
 }
 
 function notFoundWithContext(message: string, context: Record<string, unknown>): Response {
@@ -99,11 +128,13 @@ export default {
 			});
 		}
 
-		// Special-case: ?direct + .json => fetch upstream JSON and redirect to first tar.gz/zip url.
+		// Special-case: ?direct + .json => fetch upstream JSON and redirect to preferred archive url.
 		if (!isDirectJsonRequest(url)) {
 			// Everything else just proxies to the upstream metadata.
 			return fetch(new Request(upstreamUrl, request));
 		}
+
+		const preferredFileTypes = getDirectFileTypePreferences(url);
 
 		// Fetch canonical JSON (remove ?direct before going upstream).
 		upstreamUrl.searchParams.delete("direct");
@@ -144,11 +175,12 @@ export default {
 			});
 		}
 
-		const match = findFirstDirectMatch(json);
+		const match = findPreferredDirectMatch(json, preferredFileTypes);
 		if (!match) {
-			return notFoundWithContext('No entry found with `file_type` of "tar.gz" or "zip" and a `url` field.', {
+			return notFoundWithContext("No matching entry found for requested `direct` archive preference(s).", {
 				requestUrl: url.toString(),
 				upstreamUrl: upstreamUrl.toString(),
+				preferredFileTypes,
 			});
 		}
 
